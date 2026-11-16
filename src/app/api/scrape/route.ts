@@ -33,8 +33,55 @@ function isBotBlockedResponse(status: number, html: string, headers: Headers): b
   );
 }
 
+/**
+ * Converts a search query into repertuarim.com's exact `/ara/<slug>/` format
+ * (matching `searchUrl()` in repertuarim.com's `functions.js`).
+ */
+function toRepertuarimSlug(query: string): string {
+  const charMap: Record<string, string> = {
+    I: "ı",
+    İ: "i",
+    Ç: "ç",
+    Ü: "ü",
+    Ö: "ö",
+    Ş: "ş",
+    Ğ: "ğ",
+  };
+
+  return query
+    .replace(/[IİÇÜÖŞĞ]/g, (ch) => charMap[ch] ?? ch)
+    .replace(/['"?!,;.]+/g, "")
+    .replace(/[^a-zA-Z0-9şıöüğçİŞÖĞÜÇ\s_-]+/g, " ")
+    .toLowerCase()
+    .trim()
+    .replace(/[_\s-]+/g, "-");
+}
+
+function normalizeForMatch(text: string): string {
+  const trMap: Record<string, string> = {
+    ı: "i",
+    İ: "i",
+    I: "i",
+    ğ: "g",
+    Ğ: "g",
+    ü: "u",
+    Ü: "u",
+    ş: "s",
+    Ş: "s",
+    ö: "o",
+    Ö: "o",
+    ç: "c",
+    Ç: "c",
+  };
+  return text
+    .replace(/[ıİIğĞüÜşŞöÖçÇ]/g, (c) => trMap[c] ?? c)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function extractTextPreservingLines($: cheerio.CheerioAPI, el: cheerio.Cheerio<any>): string {
-  // Replace <br> and block endings with newlines before reading text
   const cloned = el.clone();
   cloned.find("script, style, ins, .ads, .advertisement, .share, .comments").remove();
   cloned.find("br").replaceWith("\n");
@@ -49,7 +96,8 @@ function parseTitleAndArtist(rawTitle: string): { title: string; artist: string 
   const clean = rawTitle
     .replace(/\s*\|\s*.*$/, "")
     .replace(/\s*-\s*(repertuarim|akorlar|ultimate guitar|tabs|chords).*$/i, "")
-    .replace(/\b(akor|tab|chords|lyrics)\b/gi, "")
+    .replace(/\s*-\s*(akor|tab|chords|lyrics)\s*$/i, "")
+    .replace(/\b(akor|tab|chords|lyrics)\s*$/i, "")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -81,7 +129,9 @@ function extractUltimateGuitar($: cheerio.CheerioAPI) {
     return {
       title: String(tab?.song_name || "").trim() || "İsimsiz Şarkı",
       artist: String(tab?.artist_name || "").trim() || "Bilinmeyen Sanatçı",
-      originalKey: tab?.tonality_name ? String(tab.tonality_name).trim() : detectOriginalKey(content),
+      originalKey: tab?.tonality_name
+        ? String(tab.tonality_name).trim()
+        : detectOriginalKey(content),
       content,
     };
   } catch {
@@ -94,31 +144,49 @@ function extractRepertuarim($: cheerio.CheerioAPI) {
     "script, style, nav, header, footer, aside, iframe, .sidebar, .comments, #comments, .related-posts, .ads, .advertisement, .share-buttons, .social-share, .breadcrumb"
   ).remove();
 
-  const h1Text =
-    $("h1.entry-title, h1.song-title, .song-header h1, h1").first().text().trim() ||
-    $("title").text().trim();
+  // On repertuarim.com song pages, <h1> has:
+  // <h1><a href=".../akor-tab/duman/" title="Duman akor">Duman</a> - Senden Daha Güzel - Akor</h1>
+  const h1El = $("h1").first();
+  const h1ArtistLink = h1El.find("a[href*='/akor-tab/'], a").first().text().replace(/\s+/g, " ").trim();
 
-  const artistMeta =
-    $(".artist-name, .song-artist, [itemprop='byArtist'], a[href*='/sanatci/'], a[href*='/artist/']")
-      .first()
-      .text()
-      .trim();
+  let artist = h1ArtistLink;
+  let title = "";
 
-  let { title, artist } = parseTitleAndArtist(h1Text);
-  if (artistMeta) {
-    artist = artistMeta;
-    if (title.toLowerCase().startsWith(artist.toLowerCase())) {
-      title = title.slice(artist.length).replace(/^[\s\-–—:]+/, "").trim() || title;
+  if (h1El.length > 0) {
+    const h1Clone = h1El.clone();
+    h1Clone.find(".icon, [class*='icon']").remove();
+    if (h1ArtistLink) {
+      h1Clone.find("a").first().remove();
+      title = h1Clone
+        .text()
+        .replace(/^[\s\-–—:]+/, "")
+        .replace(/[\s\-–—:]+\b(akor|tab|nota|şarkı sözü)\b.*$/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    } else {
+      const parsed = parseTitleAndArtist(h1Clone.text());
+      artist = parsed.artist;
+      title = parsed.title;
     }
   }
 
+  if (!title || !artist) {
+    const fallbackParsed = parseTitleAndArtist($("title").text().trim());
+    if (!artist) artist = fallbackParsed.artist;
+    if (!title) title = fallbackParsed.title;
+  }
+
+  const preChords = $("pre.chords, pre#key, pre").first();
+  const dataKey = preChords.attr("data-key")?.trim() || null;
+
   const contentSelectors = [
+    "pre.chords",
+    "pre#key",
     ".akor-content",
     ".akor-body",
     ".song-content",
     ".chord-content",
     ".lyrics-content",
-    "pre.chords",
     "pre",
     ".entry-content",
     "article .content",
@@ -140,9 +208,9 @@ function extractRepertuarim($: cheerio.CheerioAPI) {
   if (!bestContent) return null;
 
   return {
-    title,
-    artist,
-    originalKey: detectOriginalKey(bestContent),
+    title: title || "İsimsiz Şarkı",
+    artist: artist || "Bilinmeyen Sanatçı",
+    originalKey: dataKey || detectOriginalKey(bestContent),
     content: bestContent,
   };
 }
@@ -152,10 +220,20 @@ function extractGeneric($: cheerio.CheerioAPI) {
     "script, style, nav, header, footer, aside, iframe, .sidebar, .comments, #comments, .ads, .advertisement"
   ).remove();
 
-  const h1 = $("h1").first().text().trim() || $("title").text().trim();
+  const h1Clone = $("h1").first().clone();
+  h1Clone.find(".icon, [class*='icon']").remove();
+  const h1 = h1Clone.text().trim() || $("title").text().trim();
   const { title, artist } = parseTitleAndArtist(h1);
 
-  const candidates = ["pre", ".chord-sheet", ".chords", ".tab-content", ".lyrics", "article", "main"];
+  const candidates = [
+    "pre",
+    ".chord-sheet",
+    ".chords",
+    ".tab-content",
+    ".lyrics",
+    "article",
+    "main",
+  ];
   let raw = "";
   for (const sel of candidates) {
     const el = $(sel).first();
@@ -198,9 +276,126 @@ async function fetchPage(url: string) {
   }
 }
 
+async function searchRepertuarim(
+  query: string
+): Promise<{ blocked: boolean; results: Array<{ title: string; artist: string; url: string }> }> {
+  const slug = toRepertuarimSlug(query);
+  if (!slug) return { blocked: false, results: [] };
+
+  const searchUrl = `https://www.repertuarim.com/ara/${encodeURIComponent(slug)}/`;
+  const { status, headers, html } = await fetchPage(searchUrl);
+
+  if (isBotBlockedResponse(status, html, headers)) {
+    return { blocked: true, results: [] };
+  }
+
+  const $ = cheerio.load(html);
+  const hasSpellingWarning = $(".warning.spelling").length > 0;
+  const queryTokens = normalizeForMatch(query)
+    .split(" ")
+    .filter((w) => w.length >= 2);
+
+  const results: Array<{ title: string; artist: string; url: string }> = [];
+  const seen = new Set<string>();
+
+  // Only select links inside the search results list (exclude .search-suggest-list-main)
+  $(".page-search .list-list ul li a, .list-list.no-split ul li a").each((_, el) => {
+    const $el = $(el);
+    const href = ($el.attr("href") || "").trim();
+    if (!href || !href.startsWith("http")) return;
+    if (!href.includes("/akor/") && !href.includes("/tab/")) return;
+    if (seen.has(href)) return;
+
+    // Extract clean text from .title (avoiding <div class="icon color-a">A</div>)
+    const titleDiv = $el.find(".title").first();
+    let rawLabel = "";
+    if (titleDiv.length > 0) {
+      rawLabel = titleDiv.text().replace(/\s+/g, " ").trim();
+    } else {
+      const cloned = $el.clone();
+      cloned.find(".icon, [class*='icon']").remove();
+      rawLabel = cloned.text().replace(/\s+/g, " ").trim();
+    }
+
+    if (!rawLabel || rawLabel.length < 3) return;
+
+    const parsed = parseTitleAndArtist(rawLabel);
+
+    // When repertuarim shows ".warning.spelling", verify at least one query token matches
+    if (hasSpellingWarning && queryTokens.length > 0) {
+      const hay = normalizeForMatch(`${parsed.artist} ${parsed.title}`);
+      const matchesAny = queryTokens.some((tok) => hay.includes(tok));
+      if (!matchesAny) return;
+    }
+
+    seen.add(href);
+    results.push({
+      title: parsed.title,
+      artist: parsed.artist,
+      url: href,
+    });
+  });
+
+  return { blocked: false, results };
+}
+
+async function searchUltimateGuitar(
+  query: string
+): Promise<Array<{ title: string; artist: string; url: string }>> {
+  const ugUrl = `https://www.ultimate-guitar.com/search.php?search_type=title&value=${encodeURIComponent(
+    query
+  )}`;
+  const { status, headers, html } = await fetchPage(ugUrl);
+  if (isBotBlockedResponse(status, html, headers)) {
+    return [];
+  }
+
+  const $ = cheerio.load(html);
+  const storeRaw = $(".js-store").attr("data-content");
+  if (!storeRaw) return [];
+
+  try {
+    const parsed = JSON.parse(storeRaw);
+    const rawResults = parsed?.store?.page?.data?.results;
+    if (!Array.isArray(rawResults)) return [];
+
+    const results: Array<{ title: string; artist: string; url: string }> = [];
+    const seen = new Set<string>();
+
+    for (const item of rawResults) {
+      const tabUrl = typeof item?.tab_url === "string" ? item.tab_url : "";
+      const type = typeof item?.type === "string" ? item.type : "";
+      if (!tabUrl || !tabUrl.startsWith("https://tabs.ultimate-guitar.com/tab/")) continue;
+      if (type && type !== "Chords") continue;
+      if (seen.has(tabUrl)) continue;
+      seen.add(tabUrl);
+
+      const songName = String(item?.song_name || "").trim();
+      const artistName = String(item?.artist_name || "").trim();
+      if (!songName) continue;
+
+      results.push({
+        title: songName,
+        artist: artistName || "Bilinmeyen Sanatçı",
+        url: tabUrl,
+      });
+
+      if (results.length >= 6) break;
+    }
+
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { mode?: "url" | "search"; url?: string; query?: string };
+    const body = (await request.json()) as {
+      mode?: "url" | "search";
+      url?: string;
+      query?: string;
+    };
     const mode = body.mode || (body.url ? "url" : "search");
 
     if (mode === "search") {
@@ -209,61 +404,38 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: "Arama terimi girin." }, { status: 400 });
       }
 
-      const searchUrl = `https://www.repertuarim.com/?s=${encodeURIComponent(query)}`;
-      try {
-        const { status, headers, html } = await fetchPage(searchUrl);
-        if (isBotBlockedResponse(status, html, headers)) {
-          return NextResponse.json({
-            blocked: true,
-            results: [],
-            message:
-              "Arama isteği site koruması (Cloudflare) nedeniyle engellendi. Doğrudan URL yapıştırabilir veya Akıllı Yapıştır sekmesini kullanabilirsiniz.",
-          });
-        }
+      const [repSettled, ugSettled] = await Promise.allSettled([
+        searchRepertuarim(query),
+        searchUltimateGuitar(query),
+      ]);
 
-        const $ = cheerio.load(html);
-        const results: Array<{ title: string; artist: string; url: string }> = [];
-        const seen = new Set<string>();
+      const repData =
+        repSettled.status === "fulfilled"
+          ? repSettled.value
+          : { blocked: true, results: [] };
+      const ugResults = ugSettled.status === "fulfilled" ? ugSettled.value : [];
 
-        $("article a, .post-title a, .entry-title a, .search-results a, a[href*='repertuarim.com']")
-          .each((_, el) => {
-            const href = $(el).attr("href") || "";
-            const text = $(el).text().replace(/\s+/g, " ").trim();
-            if (!href || !text || text.length < 4) return;
-            if (
-              href.includes("/category/") ||
-              href.includes("/tag/") ||
-              href.includes("/page/") ||
-              href.includes("#")
-            ) {
-              return;
-            }
-            if (!href.startsWith("http")) return;
-            if (seen.has(href)) return;
-            seen.add(href);
+      const combined = [...repData.results, ...ugResults].slice(0, 15);
 
-            const parsed = parseTitleAndArtist(text);
-            results.push({ title: parsed.title, artist: parsed.artist, url: href });
-          });
-
-        return NextResponse.json({
-          blocked: false,
-          results: results.slice(0, 12),
-          ...(results.length === 0
-            ? {
-                message:
-                  "Sonuç bulunamadı. Doğrudan şarkı linkini yapıştırabilir veya Akıllı Yapıştır sekmesini kullanabilirsiniz.",
-              }
-            : {}),
-        });
-      } catch {
+      if (combined.length === 0 && repData.blocked) {
         return NextResponse.json({
           blocked: true,
           results: [],
           message:
-            "Siteye şu anda erişilemedi. Akıllı Yapıştır sekmesini kullanarak akorları doğrudan yapıştırabilirsiniz.",
+            "Arama isteği site koruması (Cloudflare) nedeniyle engellendi. Doğrudan URL yapıştırabilir veya Akıllı Yapıştır sekmesini kullanabilirsiniz.",
         });
       }
+
+      return NextResponse.json({
+        blocked: false,
+        results: combined,
+        ...(combined.length === 0
+          ? {
+              message:
+                "Eşleşen şarkı bulunamadı. Doğrudan şarkı linkini yapıştırabilir veya Akıllı Yapıştır sekmesini kullanabilirsiniz.",
+            }
+          : {}),
+      });
     }
 
     // URL fetch mode
@@ -279,7 +451,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Geçersiz URL formatı." }, { status: 400 });
     }
 
-    if (!["http:", "https:"].includes(parsedUrl.protocol) || isDisallowedHost(parsedUrl.hostname)) {
+    if (
+      !["http:", "https:"].includes(parsedUrl.protocol) ||
+      isDisallowedHost(parsedUrl.hostname)
+    ) {
       return NextResponse.json({ error: "Bu URL adresine izin verilmiyor." }, { status: 400 });
     }
 

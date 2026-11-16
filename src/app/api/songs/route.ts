@@ -27,8 +27,12 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ songs });
   } catch (err) {
+    const detail = err instanceof Error ? err.message : "Bilinmeyen veritabanı hatası";
     console.error("GET /api/songs failed:", err);
-    return NextResponse.json({ error: "Şarkılar yüklenemedi." }, { status: 500 });
+    return NextResponse.json(
+      { error: `Şarkılar yüklenemedi: ${detail}` },
+      { status: 500 }
+    );
   }
 }
 
@@ -39,15 +43,15 @@ export async function POST(request: NextRequest) {
       artist?: string;
       content?: string;
       originalKey?: string | null;
-      transposeOffset?: number;
+      transposeOffset?: number | string;
       notes?: string | null;
       sourceUrl?: string | null;
-      tags?: string[];
+      tags?: unknown;
     };
 
-    const title = body.title?.trim() || "";
-    const artist = body.artist?.trim() || "";
-    const rawContent = body.content || "";
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    const artist = typeof body.artist === "string" ? body.artist.trim() : "";
+    const rawContent = typeof body.content === "string" ? body.content : "";
 
     if (!title || !artist || !rawContent.trim()) {
       return NextResponse.json(
@@ -57,11 +61,18 @@ export async function POST(request: NextRequest) {
     }
 
     const normalizedContent = normalizeSongContent(rawContent);
-    const originalKey = body.originalKey?.trim() || detectOriginalKey(normalizedContent);
-    const offset =
-      typeof body.transposeOffset === "number"
-        ? Math.max(-11, Math.min(11, Math.trunc(body.transposeOffset)))
-        : 0;
+    const originalKey =
+      (typeof body.originalKey === "string" && body.originalKey.trim()) ||
+      detectOriginalKey(normalizedContent);
+
+    const parsedOffset = Number(body.transposeOffset ?? 0);
+    const offset = Number.isFinite(parsedOffset)
+      ? Math.max(-11, Math.min(11, Math.trunc(parsedOffset)))
+      : 0;
+
+    const tags = Array.isArray(body.tags)
+      ? body.tags.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+      : [];
 
     const song = await createSong({
       title,
@@ -69,14 +80,18 @@ export async function POST(request: NextRequest) {
       content: normalizedContent,
       originalKey,
       transposeOffset: offset,
-      notes: body.notes ?? null,
-      sourceUrl: body.sourceUrl ?? null,
-      tags: Array.isArray(body.tags) ? body.tags : [],
+      notes: typeof body.notes === "string" ? body.notes : null,
+      sourceUrl: typeof body.sourceUrl === "string" ? body.sourceUrl : null,
+      tags,
     });
 
     return NextResponse.json({ song }, { status: 201 });
   } catch (err) {
+    const detail = err instanceof Error ? err.message : "Bilinmeyen veritabanı hatası";
     console.error("POST /api/songs failed:", err);
-    return NextResponse.json({ error: "Şarkı kaydedilemedi." }, { status: 500 });
+    return NextResponse.json(
+      { error: `Şarkı kaydedilemedi: ${detail}` },
+      { status: 500 }
+    );
   }
 }

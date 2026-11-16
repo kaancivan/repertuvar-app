@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { prisma } from "./prisma";
+import { getNormalizedDatabaseUrl, prisma } from "./prisma";
 
 export interface TagDTO {
   id: string;
@@ -62,16 +63,43 @@ interface LocalStore {
   }>;
 }
 
-const DATA_DIR = path.join(process.cwd(), ".data");
+// Use /tmp on serverless read-only filesystems (like Vercel) if fallback store is ever needed
+const DATA_DIR = process.env.VERCEL
+  ? path.join(os.tmpdir(), "repertoire-data")
+  : path.join(process.cwd(), ".data");
 const DATA_FILE = path.join(DATA_DIR, "repertoire.json");
 
 function isLiveDatabaseConfigured(): boolean {
-  const url = process.env.DATABASE_URL?.trim() || "";
-  if (!url) return false;
-  if (url.includes("ep-example-123456") || url.includes("user:password@")) {
-    return false;
+  return getNormalizedDatabaseUrl() !== null;
+}
+
+async function withRetry<T>(fn: () => Promise<T>, retries = 1): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (retries <= 0) throw err;
+    await new Promise((r) => setTimeout(r, 700));
+    return withRetry(fn, retries - 1);
   }
-  return url.startsWith("postgres://") || url.startsWith("postgresql://");
+}
+
+async function resolveTagIds(tagNames: string[]): Promise<{ id: string }[]> {
+  const uniqueNames = Array.from(
+    new Set(tagNames.map((t) => t.trim()).filter(Boolean))
+  );
+  if (uniqueNames.length === 0) return [];
+
+  const records: { id: string }[] = [];
+  for (const name of uniqueNames) {
+    const tag = await prisma.tag.upsert({
+      where: { name },
+      update: {},
+      create: { name },
+      select: { id: true },
+    });
+    records.push({ id: tag.id });
+  }
+  return records;
 }
 
 function createDefaultStore(): LocalStore {
@@ -95,7 +123,7 @@ function createDefaultStore(): LocalStore {
         tagIds: [tagAkustik.id, tagElektro.id, tagSetlist.id],
         createdAt: now,
         updatedAt: now,
-      content: `[Intro]
+        content: `[Intro]
 Am   G   F   E   (x2)
 
 [Verse 1]
@@ -297,15 +325,13 @@ function mapPrismaSong(song: {
 
 export async function listSongs(): Promise<SongDTO[]> {
   if (isLiveDatabaseConfigured()) {
-    try {
-      const songs = await prisma.song.findMany({
+    const songs = await withRetry(() =>
+      prisma.song.findMany({
         include: { tags: true },
         orderBy: { updatedAt: "desc" },
-      });
-      return songs.map(mapPrismaSong);
-    } catch (err) {
-      console.error("Prisma listSongs error, falling back to local store:", err);
-    }
+      })
+    );
+    return songs.map(mapPrismaSong);
   }
 
   const store = readLocalStore();
@@ -317,15 +343,13 @@ export async function listSongs(): Promise<SongDTO[]> {
 
 export async function getSongById(id: string): Promise<SongDTO | null> {
   if (isLiveDatabaseConfigured()) {
-    try {
-      const song = await prisma.song.findUnique({
+    const song = await withRetry(() =>
+      prisma.song.findUnique({
         where: { id },
         include: { tags: true },
-      });
-      return song ? mapPrismaSong(song) : null;
-    } catch (err) {
-      console.error("Prisma getSongById error, falling back to local store:", err);
-    }
+      })
+    );
+    return song ? mapPrismaSong(song) : null;
   }
 
   const store = readLocalStore();
@@ -339,29 +363,31 @@ export async function createSong(input: CreateSongInput): Promise<SongDTO> {
   );
 
   if (isLiveDatabaseConfigured()) {
-    try {
+    return await withRetry(async () => {
+      const tagRecords = await resolveTagIds(cleanTags);
       const song = await prisma.song.create({
         data: {
           title: input.title.trim(),
           artist: input.artist.trim(),
           content: input.content,
           originalKey: input.originalKey?.trim() || null,
-          transposeOffset: input.transposeOffset ?? 0,
+          transposeOffset: Number.isFinite(Number(input.transposeOffset))
+            ? Math.trunc(Number(input.transposeOffset))
+            : 0,
           notes: input.notes?.trim() || null,
           sourceUrl: input.sourceUrl?.trim() || null,
-          tags: {
-            connectOrCreate: cleanTags.map((name) => ({
-              where: { name },
-              create: { name },
-            })),
-          },
+          ...(tagRecords.length > 0
+            ? {
+                tags: {
+                  connect: tagRecords,
+                },
+              }
+            : {}),
         },
         include: { tags: true },
       });
       return mapPrismaSong(song);
-    } catch (err) {
-      console.error("Prisma createSong error, falling back to local store:", err);
-    }
+    });
   }
 
   const store = readLocalStore();
@@ -400,9 +426,12 @@ export async function updateSong(id: string, input: UpdateSongInput): Promise<So
     : undefined;
 
   if (isLiveDatabaseConfigured()) {
-    try {
+    return await withRetry(async () => {
       const existing = await prisma.song.findUnique({ where: { id } });
       if (!existing) return null;
+
+      const tagRecords =
+        cleanTags !== undefined ? await resolveTagIds(cleanTags) : undefined;
 
       const updated = await prisma.song.update({
         where: { id },
@@ -414,20 +443,20 @@ export async function updateSong(id: string, input: UpdateSongInput): Promise<So
             ? { originalKey: input.originalKey?.trim() || null }
             : {}),
           ...(input.transposeOffset !== undefined
-            ? { transposeOffset: input.transposeOffset }
+            ? {
+                transposeOffset: Number.isFinite(Number(input.transposeOffset))
+                  ? Math.trunc(Number(input.transposeOffset))
+                  : 0,
+              }
             : {}),
           ...(input.notes !== undefined ? { notes: input.notes?.trim() || null } : {}),
           ...(input.sourceUrl !== undefined
             ? { sourceUrl: input.sourceUrl?.trim() || null }
             : {}),
-          ...(cleanTags !== undefined
+          ...(tagRecords !== undefined
             ? {
                 tags: {
-                  set: [],
-                  connectOrCreate: cleanTags.map((name) => ({
-                    where: { name },
-                    create: { name },
-                  })),
+                  set: tagRecords,
                 },
               }
             : {}),
@@ -435,9 +464,7 @@ export async function updateSong(id: string, input: UpdateSongInput): Promise<So
         include: { tags: true },
       });
       return mapPrismaSong(updated);
-    } catch (err) {
-      console.error("Prisma updateSong error, falling back to local store:", err);
-    }
+    });
   }
 
   const store = readLocalStore();
@@ -484,10 +511,10 @@ export async function updateSong(id: string, input: UpdateSongInput): Promise<So
 export async function deleteSong(id: string): Promise<boolean> {
   if (isLiveDatabaseConfigured()) {
     try {
-      await prisma.song.delete({ where: { id } });
+      await withRetry(() => prisma.song.delete({ where: { id } }));
       return true;
-    } catch (err) {
-      console.error("Prisma deleteSong error, falling back to local store:", err);
+    } catch {
+      return false;
     }
   }
 
@@ -501,15 +528,13 @@ export async function deleteSong(id: string): Promise<boolean> {
 
 export async function listTags(): Promise<TagDTO[]> {
   if (isLiveDatabaseConfigured()) {
-    try {
-      const tags = await prisma.tag.findMany({
+    const tags = await withRetry(() =>
+      prisma.tag.findMany({
         include: { _count: { select: { songs: true } } },
         orderBy: { name: "asc" },
-      });
-      return tags.map((t) => ({ id: t.id, name: t.name, songCount: t._count.songs }));
-    } catch (err) {
-      console.error("Prisma listTags error, falling back to local store:", err);
-    }
+      })
+    );
+    return tags.map((t) => ({ id: t.id, name: t.name, songCount: t._count.songs }));
   }
 
   const store = readLocalStore();
@@ -525,16 +550,14 @@ export async function listTags(): Promise<TagDTO[]> {
 export async function createTag(name: string): Promise<TagDTO> {
   const cleanName = name.trim();
   if (isLiveDatabaseConfigured()) {
-    try {
-      const tag = await prisma.tag.upsert({
+    const tag = await withRetry(() =>
+      prisma.tag.upsert({
         where: { name: cleanName },
         update: {},
         create: { name: cleanName },
-      });
-      return { id: tag.id, name: tag.name };
-    } catch (err) {
-      console.error("Prisma createTag error, falling back to local store:", err);
-    }
+      })
+    );
+    return { id: tag.id, name: tag.name };
   }
 
   const store = readLocalStore();
@@ -550,17 +573,17 @@ export async function createTag(name: string): Promise<TagDTO> {
 export async function deleteTag(id: string): Promise<boolean> {
   if (isLiveDatabaseConfigured()) {
     try {
-      await prisma.tag.delete({ where: { id } });
+      await withRetry(() => prisma.tag.delete({ where: { id } }));
       return true;
-    } catch (err) {
-      console.error("Prisma deleteTag error, falling back to local store:", err);
+    } catch {
+      return false;
     }
   }
 
   const store = readLocalStore();
   const before = store.tags.length;
   store.tags = store.tags.filter((t) => t.id !== id);
-  if (store.tags.length === before) return false;
+  if (store.songs.length === before) return false;
   store.songs = store.songs.map((s) => ({
     ...s,
     tagIds: s.tagIds.filter((tid) => tid !== id),

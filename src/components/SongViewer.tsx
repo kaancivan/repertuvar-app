@@ -37,9 +37,9 @@ export function SongViewer({ initialSong, allTags }: SongViewerProps) {
   // Fullscreen / Hide Bar mode
   const [barHidden, setBarHidden] = useState(false);
 
-  // Auto-Scroll state
+  // Auto-Scroll state (supports slow sub-1x speeds from 0.25x to 3x)
   const [autoScrolling, setAutoScrolling] = useState(false);
-  const [scrollSpeed, setScrollSpeed] = useState<number>(2); // 1x to 5x
+  const [scrollSpeed, setScrollSpeed] = useState<number>(1); // 0.25x to 3x
   const [userInteracting, setUserInteracting] = useState(false);
   const scrollAccumRef = useRef(0);
   const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -134,8 +134,8 @@ export function SongViewer({ initialSong, allTags }: SongViewerProps) {
       const deltaSeconds = Math.min((timestamp - lastFrameRef.current) / 1000, 0.1);
       lastFrameRef.current = timestamp;
 
-      // Speed curve: 1x ≈ 14px/s up to 5x ≈ 82px/s
-      const pxPerSecond = 6 + scrollSpeed * 15;
+      // Speed curve: 0.25x ≈ 11px/s, 0.5x ≈ 22px/s, 0.75x ≈ 33px/s, 1x ≈ 44px/s up to 3x ≈ 132px/s
+      const pxPerSecond = scrollSpeed * 44;
       scrollAccumRef.current += pxPerSecond * deltaSeconds;
 
       if (scrollAccumRef.current >= 1) {
@@ -379,15 +379,15 @@ export function SongViewer({ initialSong, allTags }: SongViewerProps) {
                 </button>
                 <input
                   type="range"
-                  min={1}
-                  max={5}
-                  step={0.5}
+                  min={0.25}
+                  max={3}
+                  step={0.25}
                   value={scrollSpeed}
                   onChange={(e) => setScrollSpeed(Number(e.target.value))}
                   aria-label="Otomatik kaydırma hızı"
-                  className="w-14 sm:w-16 accent-[#2DD4BF] cursor-pointer"
+                  className="w-16 sm:w-20 accent-[#2DD4BF] cursor-pointer"
                 />
-                <span className="font-mono text-[11px] text-slate-300 w-6 text-right">
+                <span className="font-mono text-[11px] text-slate-300 w-9 text-right">
                   {scrollSpeed}x
                 </span>
               </div>

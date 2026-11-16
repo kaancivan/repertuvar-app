@@ -14,8 +14,9 @@ export async function GET(
     }
     return NextResponse.json({ song });
   } catch (err) {
+    const detail = err instanceof Error ? err.message : "Bilinmeyen hata";
     console.error("GET /api/songs/[id] failed:", err);
-    return NextResponse.json({ error: "Şarkı yüklenemedi." }, { status: 500 });
+    return NextResponse.json({ error: `Şarkı yüklenemedi: ${detail}` }, { status: 500 });
   }
 }
 
@@ -30,34 +31,42 @@ export async function PATCH(
       artist?: string;
       content?: string;
       originalKey?: string | null;
-      transposeOffset?: number;
+      transposeOffset?: number | string;
       notes?: string | null;
       sourceUrl?: string | null;
-      tags?: string[];
+      tags?: unknown;
     };
 
     const nextContent =
-      body.content !== undefined ? normalizeSongContent(body.content) : undefined;
-    const nextOffset =
-      body.transposeOffset !== undefined
-        ? Math.max(-11, Math.min(11, Math.trunc(body.transposeOffset)))
-        : undefined;
+      typeof body.content === "string" ? normalizeSongContent(body.content) : undefined;
+
+    let nextOffset: number | undefined = undefined;
+    if (body.transposeOffset !== undefined) {
+      const parsed = Number(body.transposeOffset);
+      nextOffset = Number.isFinite(parsed)
+        ? Math.max(-11, Math.min(11, Math.trunc(parsed)))
+        : 0;
+    }
+
+    const nextTags = Array.isArray(body.tags)
+      ? body.tags.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+      : undefined;
 
     const updated = await updateSong(id, {
-      ...(body.title !== undefined ? { title: body.title } : {}),
-      ...(body.artist !== undefined ? { artist: body.artist } : {}),
+      ...(typeof body.title === "string" ? { title: body.title } : {}),
+      ...(typeof body.artist === "string" ? { artist: body.artist } : {}),
       ...(nextContent !== undefined ? { content: nextContent } : {}),
       ...(body.originalKey !== undefined
         ? {
             originalKey:
-              body.originalKey?.trim() ||
+              (typeof body.originalKey === "string" && body.originalKey.trim()) ||
               (nextContent ? detectOriginalKey(nextContent) : null),
           }
         : {}),
       ...(nextOffset !== undefined ? { transposeOffset: nextOffset } : {}),
       ...(body.notes !== undefined ? { notes: body.notes } : {}),
       ...(body.sourceUrl !== undefined ? { sourceUrl: body.sourceUrl } : {}),
-      ...(body.tags !== undefined ? { tags: body.tags } : {}),
+      ...(nextTags !== undefined ? { tags: nextTags } : {}),
     });
 
     if (!updated) {
@@ -66,8 +75,9 @@ export async function PATCH(
 
     return NextResponse.json({ song: updated });
   } catch (err) {
+    const detail = err instanceof Error ? err.message : "Bilinmeyen hata";
     console.error("PATCH /api/songs/[id] failed:", err);
-    return NextResponse.json({ error: "Güncelleme başarısız." }, { status: 500 });
+    return NextResponse.json({ error: `Güncelleme başarısız: ${detail}` }, { status: 500 });
   }
 }
 
@@ -83,7 +93,8 @@ export async function DELETE(
     }
     return NextResponse.json({ ok: true });
   } catch (err) {
+    const detail = err instanceof Error ? err.message : "Bilinmeyen hata";
     console.error("DELETE /api/songs/[id] failed:", err);
-    return NextResponse.json({ error: "Silme başarısız." }, { status: 500 });
+    return NextResponse.json({ error: `Silme başarısız: ${detail}` }, { status: 500 });
   }
 }
