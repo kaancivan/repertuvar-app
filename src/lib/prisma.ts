@@ -2,7 +2,7 @@ import { PrismaClient } from "@prisma/client";
 
 /**
  * Normalizes the PostgreSQL connection string for Prisma + Neon:
- * - Reads DATABASE_URL (or Vercel-Neon integration env vars POSTGRES_PRISMA_URL / POSTGRES_URL)
+ * - Reads DATABASE_URL (or Vercel-Neon integration env vars POSTGRES_PRISMA_URL / POSTGRES_URL / NEON_DATABASE_URL)
  * - Strips accidental surrounding quotes or "DATABASE_URL=" prefix
  * - Appends pgbouncer=true & connect_timeout=15 for Neon "-pooler" endpoints
  * - Removes channel_binding=require on pooled URLs to avoid Linux OpenSSL / PgBouncer issues
@@ -46,7 +46,6 @@ export function getNormalizedDatabaseUrl(): string | null {
       if (!parsed.searchParams.has("pgbouncer")) {
         parsed.searchParams.set("pgbouncer", "true");
       }
-      // channel_binding=require on PgBouncer endpoints can fail on serverless Linux OpenSSL
       if (parsed.searchParams.get("channel_binding") === "require") {
         parsed.searchParams.delete("channel_binding");
       }
@@ -58,6 +57,16 @@ export function getNormalizedDatabaseUrl(): string | null {
   } catch {
     return cleaned;
   }
+}
+
+export function requireDatabaseConfigured(): string {
+  const url = getNormalizedDatabaseUrl();
+  if (!url) {
+    throw new Error(
+      "DATABASE_URL ortam değişkeni tanımlı değil veya geçersiz. Lütfen Vercel -> Settings -> Environment Variables bölümüne Neon DATABASE_URL değerini ekleyip Redeploy yapın."
+    );
+  }
+  return url;
 }
 
 const globalForPrisma = globalThis as unknown as {

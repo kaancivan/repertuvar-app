@@ -3,6 +3,7 @@ import { getSongById, listTags } from "@/lib/db";
 import { SongViewer } from "@/components/SongViewer";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export default async function SongPage({
   params,
@@ -10,7 +11,8 @@ export default async function SongPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [song, tags] = await Promise.all([getSongById(id), listTags()]);
+  const decodedId = decodeURIComponent(id);
+  const [song, tags] = await Promise.all([getSongById(decodedId), listTags()]);
 
   if (!song) {
     notFound();
