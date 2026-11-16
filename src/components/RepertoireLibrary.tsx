@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -9,6 +9,7 @@ import {
   Plus,
   Search,
   Tag as TagIcon,
+  Trash2,
   X,
   SlidersHorizontal,
   ChevronRight,
@@ -26,13 +27,78 @@ export function RepertoireLibrary({
   initialTags,
 }: RepertoireLibraryProps) {
   const router = useRouter();
-  const [songs] = useState<SongDTO[]>(initialSongs);
+  const [songs, setSongs] = useState<SongDTO[]>(initialSongs);
   const [tags, setTags] = useState<TagDTO[]>(initialTags);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedTag, setSelectedTag] = useState<string>("Tümü");
   const [addingTag, setAddingTag] = useState(false);
   const [newTagName, setNewTagName] = useState("");
   const [creatingTag, setCreatingTag] = useState(false);
+
+  // Long-press delete modal state
+  const [deleteTarget, setDeleteTarget] = useState<
+    | { kind: "tag"; id: string; label: string }
+    | { kind: "song"; id: string; label: string }
+    | null
+  >(null);
+  const [deletingTarget, setDeletingTarget] = useState(false);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTriggeredRef = useRef(false);
+
+  function startLongPress(
+    target: { kind: "tag"; id: string; label: string } | { kind: "song"; id: string; label: string }
+  ) {
+    longPressTriggeredRef.current = false;
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = setTimeout(() => {
+      longPressTriggeredRef.current = true;
+      setDeleteTarget(target);
+    }, 550);
+  }
+
+  function cancelLongPress() {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }
+
+  async function confirmDeleteTarget() {
+    if (!deleteTarget || deletingTarget) return;
+    setDeletingTarget(true);
+    try {
+      if (deleteTarget.kind === "tag") {
+        const res = await fetch(`/api/tags?id=${encodeURIComponent(deleteTarget.id)}`, {
+          method: "DELETE",
+        });
+        if (res.ok) {
+          setTags((prev) => prev.filter((t) => t.id !== deleteTarget.id));
+          setSongs((prev) =>
+            prev.map((s) => ({
+              ...s,
+              tags: s.tags.filter((t) => t.id !== deleteTarget.id),
+            }))
+          );
+          if (selectedTag.toLowerCase() === deleteTarget.label.toLowerCase()) {
+            setSelectedTag("Tümü");
+          }
+          setDeleteTarget(null);
+          router.refresh();
+        }
+      } else {
+        const res = await fetch(`/api/songs/${encodeURIComponent(deleteTarget.id)}`, {
+          method: "DELETE",
+        });
+        if (res.ok) {
+          setSongs((prev) => prev.filter((s) => s.id !== deleteTarget.id));
+          setDeleteTarget(null);
+          router.refresh();
+        }
+      }
+    } finally {
+      setDeletingTarget(false);
+    }
+  }
 
   const filteredSongs = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -168,8 +234,25 @@ export function RepertoireLibrary({
                 <button
                   key={tag.id}
                   type="button"
-                  onClick={() => setSelectedTag(tag.name)}
-                  className={`shrink-0 inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition border ${
+                  onPointerDown={() =>
+                    startLongPress({ kind: "tag", id: tag.id, label: tag.name })
+                  }
+                  onPointerUp={cancelLongPress}
+                  onPointerLeave={cancelLongPress}
+                  onPointerCancel={cancelLongPress}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setDeleteTarget({ kind: "tag", id: tag.id, label: tag.name });
+                  }}
+                  onClick={() => {
+                    if (longPressTriggeredRef.current) {
+                      longPressTriggeredRef.current = false;
+                      return;
+                    }
+                    setSelectedTag(tag.name);
+                  }}
+                  title="Silmek için basılı tutun"
+                  className={`shrink-0 inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition border select-none ${
                     active
                       ? "bg-[#2DD4BF] text-[#0F172A] border-[#2DD4BF] font-semibold"
                       : "bg-[#1E293B] text-slate-300 border-slate-700/70 hover:border-slate-500"
@@ -271,7 +354,23 @@ export function RepertoireLibrary({
                 <Link
                   key={song.id}
                   href={`/songs/${song.id}`}
-                  className="group rounded-2xl bg-[#1E293B]/65 hover:bg-[#1E293B] border border-slate-800 hover:border-teal-400/40 p-4 transition flex flex-col justify-between gap-3 active:scale-[0.99]"
+                  onPointerDown={() =>
+                    startLongPress({ kind: "song", id: song.id, label: song.title })
+                  }
+                  onPointerUp={cancelLongPress}
+                  onPointerLeave={cancelLongPress}
+                  onPointerCancel={cancelLongPress}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setDeleteTarget({ kind: "song", id: song.id, label: song.title });
+                  }}
+                  onClick={(e) => {
+                    if (longPressTriggeredRef.current) {
+                      e.preventDefault();
+                      longPressTriggeredRef.current = false;
+                    }
+                  }}
+                  className="group rounded-2xl bg-[#1E293B]/65 hover:bg-[#1E293B] border border-slate-800 hover:border-teal-400/40 p-4 transition flex flex-col justify-between gap-3 active:scale-[0.99] select-none"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -325,6 +424,51 @@ export function RepertoireLibrary({
           </div>
         )}
       </main>
+
+      {/* Long-Press Delete Confirmation Modal */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => !deletingTarget && setDeleteTarget(null)}
+        >
+          <div
+            className="w-full max-w-xs rounded-2xl bg-[#0F172A] border border-slate-700/80 p-5 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="space-y-1">
+              <h2 className="text-base font-semibold text-[#F8FAFC]">
+                {deleteTarget.kind === "tag" ? "Etiketi Sil" : "Şarkıyı Kaldır"}
+              </h2>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                <span className="font-semibold text-[#2DD4BF]">&quot;{deleteTarget.label}&quot;</span>{" "}
+                {deleteTarget.kind === "tag"
+                  ? "etiketini silmek istiyor musunuz? Şarkılarınız silinmez."
+                  : "şarkısını repertuarınızdan kalıcı olarak kaldırmak istiyor musunuz?"}
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={deletingTarget}
+                onClick={() => setDeleteTarget(null)}
+                className="rounded-xl bg-[#1E293B] border border-slate-700 px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-700 transition"
+              >
+                İptal
+              </button>
+              <button
+                type="button"
+                disabled={deletingTarget}
+                onClick={confirmDeleteTarget}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-rose-500 hover:bg-rose-400 disabled:opacity-50 text-white font-semibold px-3.5 py-2 text-xs transition"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{deletingTarget ? "Siliniyor..." : "Sil"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
