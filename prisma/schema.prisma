@@ -1,0 +1,31 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Song {
+  id              String   @id @default(cuid())
+  title           String
+  artist          String
+  content         String   @db.Text
+  originalKey     String?
+  transposeOffset Int      @default(0)
+  notes           String?  @db.Text
+  sourceUrl       String?
+  tags            Tag[]    @relation("SongTags")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([title])
+  @@index([artist])
+}
+
+model Tag {
+  id    String @id @default(cuid())
+  name  String @unique
+  songs Song[] @relation("SongTags")
+}
